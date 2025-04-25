@@ -1,0 +1,937 @@
+import os
+import json
+import random
+import string
+import shutil
+import pandas as pd
+from datetime import datetime, timedelta
+
+# Kivy imports
+import kivy
+from kivy.app import App
+from kivy.uix.boxlayout import BoxLayout
+from kivy.uix.gridlayout import GridLayout
+from kivy.uix.button import Button
+from kivy.uix.label import Label
+from kivy.uix.textinput import TextInput
+from kivy.uix.spinner import Spinner
+from kivy.uix.scrollview import ScrollView
+from kivy.uix.screenmanager import ScreenManager, Screen
+from kivy.graphics import Color, Rectangle, RoundedRectangle
+from kivy.core.window import Window
+from kivy.utils import get_color_from_hex
+from kivy.storage.jsonstore import JsonStore
+from kivy.clock import Clock
+
+# Set app colors and constants
+BG_COLOR = '#F2F2F7'  # Light gray background (Apple-like)
+PRIMARY_COLOR = '#4CAF50'  # Green (School color)
+ACCENT_COLOR = '#2196F3'  # Blue for highlights
+TEXT_COLOR = '#000000'  # Black text
+LIGHT_TEXT_COLOR = '#777777'  # Light gray text
+BORDER_COLOR = '#E0E0E0'  # Border color
+CARD_COLOR = '#FFFFFF'  # White card background
+
+BUTTON_HEIGHT = '48dp'
+STANDARD_PADDING = '12dp'
+HEADER_FONT_SIZE = '18sp'
+CONTENT_FONT_SIZE = '16sp'
+SMALL_FONT_SIZE = '14sp'
+
+# Utility functions
+def generate_random_student_id():
+    """Generate a random student ID with format STU-XXXXXXXX"""
+    letters = string.ascii_uppercase + string.digits
+    random_part = ''.join(random.choice(letters) for _ in range(8))
+    return f"STU-{random_part}"
+
+# Platform-specific functions
+def get_app_data_dir():
+    """Get the appropriate data directory for the app based on platform"""
+    # Try to use Android-specific storage
+    try:
+        from android.storage import app_storage_path
+        return app_storage_path()
+    except:
+        # Fallback for non-Android platforms
+        if kivy.utils.platform == 'android':
+            # Alternative Android path
+            return os.path.join(os.path.expanduser('~'), '.andyy_attendance')
+        elif kivy.utils.platform == 'ios':
+            # iOS path
+            return os.path.join(os.path.expanduser('~'), 'Documents')
+        else:
+            # Desktop/other path
+            return os.path.join(os.path.expanduser('~'), '.andyy_attendance')
+
+# Data management functions
+def initialize_data():
+    """Initialize the data structure for the application if it doesn't exist"""
+    app_dir, data_dir, export_dir, _ = ensure_data_directories()
+    
+    # Create empty class files if they don't exist
+    for class_num in range(1, 9):
+        class_file = os.path.join(data_dir, f'class_{class_num}.csv')
+        if not os.path.exists(class_file):
+            # Create an empty DataFrame with required columns
+            df = pd.DataFrame(columns=[
+                'student_id', 'name', 'father_name', 'mother_name', 
+                'contact', 'address', 'attendance_count', 'total_days',
+                'last_attendance_date', 'last_attendance_status'
+            ])
+            df.to_csv(class_file, index=False)
+    
+    # Create an empty attendance records file if it doesn't exist
+    attendance_file = os.path.join(data_dir, 'attendance_records.csv')
+    if not os.path.exists(attendance_file):
+        df = pd.DataFrame(columns=[
+            'date', 'class_num', 'student_id', 'status', 'reason'
+        ])
+        df.to_csv(attendance_file, index=False)
+
+def get_class_data(class_num):
+    """Get data for a specific class"""
+    app_dir, data_dir, export_dir, _ = ensure_data_directories()
+    class_file = os.path.join(data_dir, f'class_{class_num}.csv')
+    
+    if os.path.exists(class_file):
+        try:
+            return pd.read_csv(class_file)
+        except Exception as e:
+            print(f"Error reading class data: {e}")
+            return pd.DataFrame()
+    else:
+        # If file doesn't exist, create it
+        df = pd.DataFrame(columns=[
+            'student_id', 'name', 'father_name', 'mother_name', 
+            'contact', 'address', 'attendance_count', 'total_days',
+            'last_attendance_date', 'last_attendance_status'
+        ])
+        df.to_csv(class_file, index=False)
+        return df
+
+def save_attendance(attendance_data):
+    """Save attendance data for multiple students"""
+    if not attendance_data or len(attendance_data) == 0:
+        return False
+    
+    try:
+        app_dir, data_dir, export_dir, _ = ensure_data_directories()
+        attendance_file = os.path.join(data_dir, 'attendance_records.csv')
+        
+        # Load existing records
+        if os.path.exists(attendance_file):
+            existing_records = pd.read_csv(attendance_file)
+        else:
+            existing_records = pd.DataFrame(columns=[
+                'date', 'class_num', 'student_id', 'status', 'reason'
+            ])
+        
+        # Convert attendance_data to DataFrame
+        new_records = pd.DataFrame(attendance_data)
+        
+        # Concatenate and save
+        all_records = pd.concat([existing_records, new_records], ignore_index=True)
+        all_records.to_csv(attendance_file, index=False)
+        
+        # Update student attendance counts
+        update_student_attendance_counts()
+        
+        return True
+    except Exception as e:
+        print(f"Error saving attendance: {e}")
+        return False
+
+def update_student_attendance_counts():
+    """Update attendance count and total days for each student"""
+    try:
+        app_dir, data_dir, export_dir, _ = ensure_data_directories()
+        attendance_file = os.path.join(data_dir, 'attendance_records.csv')
+        
+        if not os.path.exists(attendance_file):
+            return
+        
+        # Load attendance records
+        attendance_df = pd.read_csv(attendance_file)
+        
+        # Process each class
+        for class_num in range(1, 9):
+            class_file = os.path.join(data_dir, f'class_{class_num}.csv')
+            if not os.path.exists(class_file):
+                continue
+            
+            try:
+                class_df = pd.read_csv(class_file)
+                if class_df.empty:
+                    continue
+                
+                # Get records for this class
+                class_records = attendance_df[attendance_df['class_num'] == class_num]
+                
+                # Update each student
+                for _, student in class_df.iterrows():
+                    student_id = student['student_id']
+                    student_records = class_records[class_records['student_id'] == student_id]
+                    
+                    # Count present days
+                    present_days = len(student_records[student_records['status'] == 'present'])
+                    total_days = len(student_records)
+                    
+                    # Get last attendance date and status
+                    if not student_records.empty:
+                        last_record = student_records.sort_values('date', ascending=False).iloc[0]
+                        last_date = last_record['date']
+                        last_status = last_record['status']
+                    else:
+                        last_date = ''
+                        last_status = ''
+                    
+                    # Update student data
+                    class_df.loc[class_df['student_id'] == student_id, 'attendance_count'] = present_days
+                    class_df.loc[class_df['student_id'] == student_id, 'total_days'] = total_days
+                    class_df.loc[class_df['student_id'] == student_id, 'last_attendance_date'] = last_date
+                    class_df.loc[class_df['student_id'] == student_id, 'last_attendance_status'] = last_status
+                
+                # Save updated class data
+                class_df.to_csv(class_file, index=False)
+            
+            except Exception as e:
+                print(f"Error updating attendance for class {class_num}: {e}")
+    
+    except Exception as e:
+        print(f"Error updating attendance counts: {e}")
+
+# UI Classes
+class HomeScreen(Screen):
+    def __init__(self, **kwargs):
+        super(HomeScreen, self).__init__(**kwargs)
+        
+        # Main layout
+        main_layout = BoxLayout(orientation='vertical', spacing=10, padding=10)
+        main_layout.bind(size=self._update_rect, pos=self._update_rect)
+
+        with main_layout.canvas.before:
+            Color(*get_color_from_hex(BG_COLOR))
+            self.rect = Rectangle(size=main_layout.size, pos=main_layout.pos)
+        
+        # Header with school info
+        header = BoxLayout(orientation='vertical', size_hint_y=None, height='120dp', 
+                          padding=10)
+        header.bind(size=self._update_card, pos=self._update_card)
+        
+        with header.canvas.before:
+            Color(*get_color_from_hex(CARD_COLOR))
+            self.header_rect = RoundedRectangle(size=header.size, pos=header.pos, radius=[10])
+        
+        school_name = Label(text='Andyy Public School', font_size=HEADER_FONT_SIZE, 
+                           color=get_color_from_hex(TEXT_COLOR), halign='center', 
+                           size_hint_y=None, height='40dp')
+        
+        location = Label(text='Purpurinagar', font_size=CONTENT_FONT_SIZE, 
+                        color=get_color_from_hex(LIGHT_TEXT_COLOR), halign='center', 
+                        size_hint_y=None, height='25dp')
+        
+        principal = Label(text='Principal: Babu Bhaiya', font_size=SMALL_FONT_SIZE, 
+                         color=get_color_from_hex(LIGHT_TEXT_COLOR), halign='center', 
+                         size_hint_y=None, height='25dp')
+        
+        contact = Label(text='Contact: +9126282829292 | Email: bhutiya@gmail.com', 
+                       font_size=SMALL_FONT_SIZE, color=get_color_from_hex(LIGHT_TEXT_COLOR), 
+                       halign='center', size_hint_y=None, height='25dp')
+        
+        header.add_widget(school_name)
+        header.add_widget(location)
+        header.add_widget(principal)
+        header.add_widget(contact)
+        
+        # Class selection title
+        title = Label(text='Select Class', font_size=HEADER_FONT_SIZE, 
+                     color=get_color_from_hex(TEXT_COLOR), size_hint_y=None, height='50dp')
+        
+        # Class buttons in a grid
+        class_grid = GridLayout(cols=2, spacing=10, size_hint_y=None)
+        class_grid.bind(minimum_height=class_grid.setter('height'))
+        
+        for class_num in range(1, 9):
+            class_btn = Button(
+                text=f'Class {class_num}',
+                size_hint_y=None,
+                height=BUTTON_HEIGHT,
+                background_color=get_color_from_hex(PRIMARY_COLOR),
+                background_normal='',
+                color=get_color_from_hex('#FFFFFF')
+            )
+            class_btn.bind(on_press=lambda btn, num=class_num: self.select_class(num))
+            class_grid.add_widget(class_btn)
+        
+        # Add all components to main layout
+        main_layout.add_widget(header)
+        main_layout.add_widget(title)
+        main_layout.add_widget(class_grid)
+        
+        # Add main layout to screen
+        self.add_widget(main_layout)
+    
+    def _update_rect(self, instance, value):
+        self.rect.pos = instance.pos
+        self.rect.size = instance.size
+    
+    def _update_card(self, instance, value):
+        self.header_rect.pos = instance.pos
+        self.header_rect.size = instance.size
+    
+    def select_class(self, class_num):
+        # Store selected class and switch to class view
+        sm = self.manager
+        sm.current_class = class_num
+        sm.transition.direction = 'left'
+        sm.current = 'class_view'
+
+class ClassViewScreen(Screen):
+    def __init__(self, **kwargs):
+        super(ClassViewScreen, self).__init__(**kwargs)
+        self.current_tab = 'attendance'
+        self.attendance_data = {}  # Store marked attendance
+        
+        # Main layout
+        layout = BoxLayout(orientation='vertical', spacing=10, padding=10)
+        layout.bind(size=self._update_rect, pos=self._update_rect)
+
+        with layout.canvas.before:
+            Color(*get_color_from_hex(BG_COLOR))
+            self.rect = Rectangle(size=layout.size, pos=layout.pos)
+        
+        # Header with back button and class info
+        header = BoxLayout(orientation='horizontal', size_hint_y=None, height='50dp')
+        
+        self.back_btn = Button(
+            text='< Back',
+            size_hint_x=None,
+            width='100dp',
+            background_color=get_color_from_hex(PRIMARY_COLOR),
+            background_normal='',
+            color=get_color_from_hex('#FFFFFF')
+        )
+        self.back_btn.bind(on_press=self.go_back)
+        
+        self.class_label = Label(
+            text='Class',
+            font_size=HEADER_FONT_SIZE,
+            color=get_color_from_hex(TEXT_COLOR)
+        )
+        
+        header.add_widget(self.back_btn)
+        header.add_widget(self.class_label)
+        
+        # Tab buttons
+        tabs = BoxLayout(orientation='horizontal', size_hint_y=None, height='50dp', spacing=5)
+        
+        attendance_tab = Button(
+            text='Attendance',
+            background_color=get_color_from_hex(PRIMARY_COLOR),
+            background_normal='',
+            color=get_color_from_hex('#FFFFFF')
+        )
+        attendance_tab.bind(on_press=lambda x: self.switch_tab('attendance'))
+        
+        add_student_tab = Button(
+            text='Add Student',
+            background_color=get_color_from_hex(ACCENT_COLOR),
+            background_normal='',
+            color=get_color_from_hex('#FFFFFF')
+        )
+        add_student_tab.bind(on_press=lambda x: self.switch_tab('add_student'))
+        
+        report_tab = Button(
+            text='Reports',
+            background_color=get_color_from_hex(ACCENT_COLOR),
+            background_normal='',
+            color=get_color_from_hex('#FFFFFF')
+        )
+        report_tab.bind(on_press=lambda x: self.switch_tab('report'))
+        
+        tabs.add_widget(attendance_tab)
+        tabs.add_widget(add_student_tab)
+        tabs.add_widget(report_tab)
+        
+        # Content area
+        self.content_area = BoxLayout(orientation='vertical')
+        
+        # Add components to main layout
+        layout.add_widget(header)
+        layout.add_widget(tabs)
+        layout.add_widget(self.content_area)
+        
+        self.add_widget(layout)
+    
+    def _update_rect(self, instance, value):
+        self.rect.pos = instance.pos
+        self.rect.size = instance.size
+    
+    def on_pre_enter(self):
+        # Update class label
+        class_num = self.manager.current_class
+        self.class_label.text = f'Class {class_num}'
+        
+        # Load default tab
+        self.switch_tab('attendance')
+    
+    def go_back(self, instance):
+        self.manager.transition.direction = 'right'
+        self.manager.current = 'home'
+    
+    def switch_tab(self, tab_name):
+        # Highlight the selected tab
+        self.current_tab = tab_name
+        self.load_tab_content(tab_name)
+    
+    def load_tab_content(self, tab_name):
+        # Clear content area
+        self.content_area.clear_widgets()
+        
+        if tab_name == 'attendance':
+            self.load_attendance_tab()
+        elif tab_name == 'add_student':
+            self.load_add_student_tab()
+        elif tab_name == 'report':
+            self.load_report_tab()
+    
+    def load_attendance_tab(self):
+        class_num = self.manager.current_class
+        
+        # Get class data
+        class_data = get_class_data(class_num)
+        
+        # Reset attendance data
+        self.attendance_data = {}
+        today = datetime.now().strftime('%Y-%m-%d')
+        
+        # Create a scrollable view for student list
+        scroll = ScrollView(size_hint=(1, None), size=(Window.width, Window.height * 0.7))
+        student_list = GridLayout(cols=1, spacing=10, size_hint_y=None, padding=10)
+        student_list.bind(minimum_height=student_list.setter('height'))
+        
+        # Add date header
+        date_layout = BoxLayout(orientation='horizontal', size_hint_y=None, height='50dp')
+        date_label = Label(text=f"Date: {today}", size_hint_x=0.7)
+        date_layout.add_widget(date_label)
+        student_list.add_widget(date_layout)
+        
+        # Add header row
+        header = BoxLayout(orientation='horizontal', size_hint_y=None, height='40dp')
+        header.add_widget(Label(text='Name', size_hint_x=0.4))
+        header.add_widget(Label(text='Present', size_hint_x=0.3))
+        header.add_widget(Label(text='Absent', size_hint_x=0.3))
+        student_list.add_widget(header)
+        
+        # Add students
+        if not class_data.empty:
+            for _, student in class_data.iterrows():
+                row = BoxLayout(orientation='horizontal', size_hint_y=None, height='50dp')
+                
+                # Student info
+                student_id = student['student_id']
+                student_name = student['name']
+                
+                name_label = Label(
+                    text=student_name,
+                    halign='left',
+                    valign='middle',
+                    size_hint_x=0.4
+                )
+                name_label.bind(size=name_label.setter('text_size'))
+                
+                # Attendance buttons
+                present_btn = Button(
+                    text='Present',
+                    background_color=get_color_from_hex('#4CAF50'),
+                    background_normal='',
+                    size_hint_x=0.3
+                )
+                present_btn.bind(on_press=lambda btn, id=student_id: self.mark_attendance(id, 'present'))
+                
+                absent_btn = Button(
+                    text='Absent',
+                    background_color=get_color_from_hex('#F44336'),
+                    background_normal='',
+                    size_hint_x=0.3
+                )
+                absent_btn.bind(on_press=lambda btn, id=student_id: self.mark_attendance(id, 'absent'))
+                
+                row.add_widget(name_label)
+                row.add_widget(present_btn)
+                row.add_widget(absent_btn)
+                
+                student_list.add_widget(row)
+        else:
+            empty_label = Label(
+                text="No students in this class yet.\nAdd students from the 'Add Student' tab.",
+                size_hint_y=None,
+                height='100dp'
+            )
+            student_list.add_widget(empty_label)
+        
+        # Add save button at the bottom
+        save_btn = Button(
+            text='Save Attendance',
+            size_hint_y=None,
+            height='50dp',
+            background_color=get_color_from_hex(PRIMARY_COLOR),
+            background_normal='',
+            color=get_color_from_hex('#FFFFFF')
+        )
+        save_btn.bind(on_press=self.save_attendance_data)
+        
+        scroll.add_widget(student_list)
+        
+        self.content_area.add_widget(scroll)
+        self.content_area.add_widget(save_btn)
+    
+    def mark_attendance(self, student_id, status):
+        class_num = self.manager.current_class
+        today = datetime.now().strftime('%Y-%m-%d')
+        
+        # Store attendance data
+        self.attendance_data[student_id] = {
+            'date': today,
+            'class_num': class_num,
+            'student_id': student_id,
+            'status': status,
+            'reason': '' if status == 'present' else 'absent'
+        }
+        
+        # Provide visual feedback (this would be better with UI updates)
+        print(f"Marked {student_id} as {status}")
+    
+    def save_attendance_data(self, instance):
+        if not self.attendance_data:
+            # Show feedback - no attendance marked
+            feedback = Label(
+                text="No attendance marked.\nPlease mark attendance for at least one student.",
+                size_hint_y=None,
+                height='100dp'
+            )
+            self.content_area.add_widget(feedback)
+            return
+        
+        # Convert dictionary to list for saving
+        attendance_list = list(self.attendance_data.values())
+        
+        # Save attendance
+        success = save_attendance(attendance_list)
+        
+        if success:
+            # Clear content and show success message
+            self.content_area.clear_widgets()
+            
+            success_msg = Label(
+                text="Attendance saved successfully!",
+                size_hint_y=None,
+                height='100dp'
+            )
+            self.content_area.add_widget(success_msg)
+            
+            # Reload attendance tab after a delay
+            Clock.schedule_once(lambda dt: self.load_attendance_tab(), 2)
+        else:
+            # Show error message
+            error_msg = Label(
+                text="Error saving attendance.\nPlease try again.",
+                size_hint_y=None,
+                height='100dp'
+            )
+            self.content_area.add_widget(error_msg)
+    
+    def load_add_student_tab(self):
+        # Create form layout
+        form_layout = GridLayout(cols=2, spacing=10, padding=10)
+        
+        # Student ID (auto-generated)
+        student_id = generate_random_student_id()
+        form_layout.add_widget(Label(text="Student ID:"))
+        id_display = TextInput(text=student_id, readonly=True)
+        form_layout.add_widget(id_display)
+        
+        # Name
+        form_layout.add_widget(Label(text="Name:"))
+        name_input = TextInput(multiline=False)
+        form_layout.add_widget(name_input)
+        
+        # Father's Name
+        form_layout.add_widget(Label(text="Father's Name:"))
+        father_input = TextInput(multiline=False)
+        form_layout.add_widget(father_input)
+        
+        # Mother's Name
+        form_layout.add_widget(Label(text="Mother's Name:"))
+        mother_input = TextInput(multiline=False)
+        form_layout.add_widget(mother_input)
+        
+        # Contact Number
+        form_layout.add_widget(Label(text="Contact Number:"))
+        contact_input = TextInput(multiline=False, input_type='number')
+        form_layout.add_widget(contact_input)
+        
+        # Address
+        form_layout.add_widget(Label(text="Address:"))
+        address_input = TextInput(multiline=True)
+        form_layout.add_widget(address_input)
+        
+        # Add button
+        add_button = Button(
+            text="Add Student",
+            size_hint_y=None,
+            height='50dp',
+            background_color=get_color_from_hex(PRIMARY_COLOR),
+            background_normal='',
+            color=get_color_from_hex('#FFFFFF')
+        )
+        
+        # Bind function to add button that captures all input values
+        add_button.bind(on_press=lambda btn: self.add_student(
+            student_id,
+            name_input.text,
+            father_input.text,
+            mother_input.text,
+            contact_input.text,
+            address_input.text
+        ))
+        
+        # Add widgets to content area
+        self.content_area.add_widget(form_layout)
+        self.content_area.add_widget(add_button)
+    
+    def add_student(self, student_id, name, father_name, mother_name, contact, address):
+        # Validation
+        if not name:
+            # Show error for missing name
+            error_label = Label(
+                text="Student name is required!",
+                color=get_color_from_hex('#F44336'),
+                size_hint_y=None,
+                height='40dp'
+            )
+            self.content_area.add_widget(error_label)
+            return
+        
+        class_num = self.manager.current_class
+        
+        # Get existing class data
+        class_data = get_class_data(class_num)
+        
+        # Create new student data
+        new_student = {
+            'student_id': student_id,
+            'name': name,
+            'father_name': father_name,
+            'mother_name': mother_name,
+            'contact': contact,
+            'address': address,
+            'attendance_count': 0,
+            'total_days': 0,
+            'last_attendance_date': '',
+            'last_attendance_status': ''
+        }
+        
+        # Append new student
+        class_data = pd.concat([class_data, pd.DataFrame([new_student])], ignore_index=True)
+        
+        try:
+            # Save updated class data
+            app_dir, data_dir, export_dir, _ = ensure_data_directories()
+            class_file = os.path.join(data_dir, f'class_{class_num}.csv')
+            class_data.to_csv(class_file, index=False)
+            
+            # Show success message
+            self.content_area.clear_widgets()
+            success_label = Label(
+                text=f"Student {name} added successfully!",
+                color=get_color_from_hex('#4CAF50'),
+                size_hint_y=None,
+                height='40dp'
+            )
+            self.content_area.add_widget(success_label)
+            
+            # Reload the form after a delay
+            Clock.schedule_once(lambda dt: self.load_add_student_tab(), 2)
+        
+        except Exception as e:
+            # Show error message
+            error_label = Label(
+                text=f"Error adding student: {e}",
+                color=get_color_from_hex('#F44336'),
+                size_hint_y=None,
+                height='40dp'
+            )
+            self.content_area.add_widget(error_label)
+    
+    def load_report_tab(self):
+        class_num = self.manager.current_class
+        
+        # Create report layout
+        report_layout = BoxLayout(orientation='vertical', spacing=10, padding=10)
+        
+        # Date range selection
+        date_range = BoxLayout(orientation='horizontal', size_hint_y=None, height='50dp')
+        
+        date_range.add_widget(Label(text="Report Type:", size_hint_x=0.3))
+        
+        report_types = ['Weekly', 'Monthly', 'Custom']
+        report_spinner = Spinner(
+            text='Weekly',
+            values=report_types,
+            size_hint_x=0.7
+        )
+        date_range.add_widget(report_spinner)
+        
+        # Get current date and calculate date range
+        today = datetime.now()
+        start_date = (today - timedelta(days=7)).strftime('%Y-%m-%d')
+        end_date = today.strftime('%Y-%m-%d')
+        
+        # Date range display
+        date_display = Label(
+            text=f"Date Range: {start_date} to {end_date}",
+            size_hint_y=None,
+            height='30dp'
+        )
+        
+        # Generate report button
+        generate_btn = Button(
+            text="Generate Report",
+            size_hint_y=None,
+            height='50dp',
+            background_color=get_color_from_hex(PRIMARY_COLOR),
+            background_normal='',
+            color=get_color_from_hex('#FFFFFF')
+        )
+        
+        # Export report button
+        export_btn = Button(
+            text="Export Report",
+            size_hint_y=None,
+            height='50dp',
+            background_color=get_color_from_hex(ACCENT_COLOR),
+            background_normal='',
+            color=get_color_from_hex('#FFFFFF')
+        )
+        export_btn.bind(on_press=lambda btn: export_attendance_report(class_num))
+        
+        # Add all widgets to report layout
+        report_layout.add_widget(date_range)
+        report_layout.add_widget(date_display)
+        report_layout.add_widget(generate_btn)
+        report_layout.add_widget(export_btn)
+        
+        # Attempt to get attendance data
+        try:
+            app_dir, data_dir, export_dir, _ = ensure_data_directories()
+            attendance_file = os.path.join(data_dir, 'attendance_records.csv')
+            
+            if os.path.exists(attendance_file):
+                attendance_df = pd.read_csv(attendance_file)
+                class_attendance = attendance_df[attendance_df['class_num'] == class_num]
+                
+                # Filter by date range
+                class_attendance = class_attendance[
+                    (class_attendance['date'] >= start_date) & 
+                    (class_attendance['date'] <= end_date)
+                ]
+                
+                if not class_attendance.empty:
+                    # Calculate statistics
+                    total_records = len(class_attendance)
+                    present_count = len(class_attendance[class_attendance['status'] == 'present'])
+                    absent_count = len(class_attendance[class_attendance['status'] == 'absent'])
+                    
+                    if total_records > 0:
+                        present_percent = (present_count / total_records) * 100
+                        absent_percent = (absent_count / total_records) * 100
+                    else:
+                        present_percent = 0
+                        absent_percent = 0
+                    
+                    # Display statistics
+                    stats_layout = BoxLayout(orientation='vertical', spacing=5, padding=10,
+                                           size_hint_y=None, height='150dp')
+                    
+                    stats_layout.add_widget(Label(
+                        text=f"Total Records: {total_records}",
+                        halign='left',
+                        size_hint_y=None,
+                        height='30dp'
+                    ))
+                    
+                    stats_layout.add_widget(Label(
+                        text=f"Present: {present_count} ({present_percent:.1f}%)",
+                        halign='left',
+                        size_hint_y=None,
+                        height='30dp'
+                    ))
+                    
+                    stats_layout.add_widget(Label(
+                        text=f"Absent: {absent_count} ({absent_percent:.1f}%)",
+                        halign='left',
+                        size_hint_y=None,
+                        height='30dp'
+                    ))
+                    
+                    report_layout.add_widget(stats_layout)
+                else:
+                    # No data in date range
+                    report_layout.add_widget(Label(
+                        text="No attendance data for the selected period",
+                        size_hint_y=None,
+                        height='50dp'
+                    ))
+            else:
+                # No attendance data file
+                report_layout.add_widget(Label(
+                    text="No attendance records found",
+                    size_hint_y=None,
+                    height='50dp'
+                ))
+        
+        except Exception as e:
+            # Error handling
+            error_label = Label(
+                text=f"Error generating report: {e}",
+                color=get_color_from_hex('#F44336'),
+                size_hint_y=None,
+                height='50dp'
+            )
+            report_layout.add_widget(error_label)
+        
+        self.content_area.add_widget(report_layout)
+
+# Functions for offline data management
+def ensure_data_directories():
+    """Ensure all necessary data directories exist"""
+    # Get the correct app data directory based on platform
+    app_dir = get_app_data_dir()
+    
+    # Create data directories
+    data_dir = os.path.join(app_dir, 'data')
+    if not os.path.exists(data_dir):
+        os.makedirs(data_dir)
+    
+    # Create export directory
+    export_dir = os.path.join(app_dir, 'exports')
+    if not os.path.exists(export_dir):
+        os.makedirs(export_dir)
+    
+    # Create backup directory
+    backup_dir = os.path.join(app_dir, 'backups')
+    if not os.path.exists(backup_dir):
+        os.makedirs(backup_dir)
+    
+    return app_dir, data_dir, export_dir, backup_dir
+
+def backup_data():
+    """Create a backup of all data files"""
+    try:
+        app_dir, data_dir, export_dir, backup_dir = ensure_data_directories()
+        
+        # Create a backup directory with timestamp
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        current_backup_dir = os.path.join(backup_dir, f'backup_{timestamp}')
+        os.makedirs(current_backup_dir)
+        
+        # Copy all CSV files to backup directory
+        for file_name in os.listdir(data_dir):
+            if file_name.endswith('.csv'):
+                shutil.copy(
+                    os.path.join(data_dir, file_name),
+                    os.path.join(current_backup_dir, file_name)
+                )
+        
+        # Limit the number of backups to keep (keep last 5)
+        all_backups = sorted([d for d in os.listdir(backup_dir) if d.startswith('backup_')])
+        if len(all_backups) > 5:
+            for old_backup in all_backups[:-5]:
+                old_path = os.path.join(backup_dir, old_backup)
+                if os.path.isdir(old_path):
+                    shutil.rmtree(old_path)
+        
+        return current_backup_dir
+    except Exception as e:
+        print(f"Error creating backup: {e}")
+        return None
+
+def export_attendance_report(class_num=None):
+    """Export attendance data as CSV for sharing"""
+    try:
+        app_dir, data_dir, export_dir, _ = ensure_data_directories()
+        
+        # If class_num is None, export all classes
+        if class_num is None:
+            # Prepare a combined report of all classes
+            all_students = pd.DataFrame()
+            for i in range(1, 9):
+                class_data = get_class_data(i)
+                if class_data is not None and not class_data.empty:
+                    all_students = pd.concat([all_students, class_data])
+            
+            if not all_students.empty:
+                timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                export_path = os.path.join(export_dir, f'all_classes_{timestamp}.csv')
+                all_students.to_csv(export_path, index=False)
+                return export_path
+        else:
+            # Export just the specified class
+            class_data = get_class_data(class_num)
+            if class_data is not None and not class_data.empty:
+                timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                export_path = os.path.join(export_dir, f'class_{class_num}_{timestamp}.csv')
+                class_data.to_csv(export_path, index=False)
+                return export_path
+    except Exception as e:
+        print(f"Error exporting data: {e}")
+    
+    return None
+
+class AttendanceApp(App):
+    def build(self):
+        # Initialize data storage
+        self.app_dir, self.data_dir, self.export_dir, self.backup_dir = ensure_data_directories()
+        
+        # Create data store for app settings
+        self.settings_store = JsonStore(os.path.join(self.app_dir, 'settings.json'))
+        
+        # Initialize data
+        initialize_data()
+        
+        # Schedule automatic backups
+        Clock.schedule_interval(lambda dt: backup_data(), 3600)  # Backup every hour
+        
+        # Set window color
+        Window.clearcolor = get_color_from_hex(BG_COLOR)
+        
+        # Create the screen manager
+        sm = ScreenManager()
+        sm.current_class = 1  # Store the currently selected class
+        
+        # Add screens
+        home_screen = HomeScreen(name='home')
+        class_screen = ClassViewScreen(name='class_view')
+        
+        sm.add_widget(home_screen)
+        sm.add_widget(class_screen)
+        
+        return sm
+        
+    def on_pause(self):
+        # This ensures the app doesn't close when the user switches to another app
+        # Essential for mobile device usage
+        return True
+        
+    def on_resume(self):
+        # Called when the app is resumed after pausing
+        pass
+        
+    def on_stop(self):
+        # Create a backup when the app is closed
+        backup_data()
+
+if __name__ == '__main__':
+    AttendanceApp().run()
